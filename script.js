@@ -42,6 +42,20 @@
     }
     function getAllItems() { const items = []; toolboxData.categories.forEach(cat => { if (cat.subcategories) cat.subcategories.forEach(sub => sub.items.forEach(item => items.push({ ...item, category: cat, subcategory: sub.name }))); else if (cat.items) cat.items.forEach(item => items.push({ ...item, category: cat, subcategory: null })); }); return items; }
     function findItemById(id) { return getAllItems().find(item => item.id === id) || null; }
+    function findItemRecord(id) {
+        for (const category of toolboxData.categories) {
+            if (category.subcategories) {
+                for (const subcategory of category.subcategories) {
+                    const item = (subcategory.items || []).find(entry => entry.id === id);
+                    if (item) return { item, category, subcategory: subcategory.name };
+                }
+            } else {
+                const item = (category.items || []).find(entry => entry.id === id);
+                if (item) return { item, category, subcategory: null };
+            }
+        }
+        return null;
+    }
     function matchesSearch(item, query) { if (!query) return true; const fields = [item.name, item.url, item.note || '', ...(item.tags || []), item.subcategory || '', item.category.name].join(' ').toLowerCase(); return fields.includes(query.toLowerCase()); }
 
     function renderViewTabs() {
@@ -81,7 +95,7 @@
     function openModal(modal) { modal.classList.remove('hidden'); document.body.style.overflow = 'hidden'; }
     function closeModal(modal) { modal.classList.add('hidden'); document.body.style.overflow = ''; }
     function updateVisitButton() { const url = $('detail-url').value.trim(); const btn = $('detail-visit'); if (url) { btn.href = url; btn.classList.remove('hidden'); } else btn.classList.add('hidden'); }
-    function openDetailModal(id) { const found = findItemById(id); if (!found) return; $('detail-id').value = found.id; $('detail-category-id').value = found.category.id; $('detail-subcategory').value = found.subcategory || ''; $('detail-name').value = found.name; $('detail-url').value = found.url || ''; $('detail-tags').value = (found.tags || []).join(', '); $('detail-note').value = found.note || ''; updateVisitButton(); openModal(detailModal); }
+    function openDetailModal(id) { const record = findItemRecord(id); if (!record) return; const found = record.item; $('detail-id').value = found.id; $('detail-category-id').value = record.category.id; $('detail-subcategory').value = record.subcategory || ''; $('detail-name').value = found.name; $('detail-url').value = found.url || ''; $('detail-tags').value = (found.tags || []).join(', '); $('detail-note').value = found.note || ''; updateVisitButton(); openModal(detailModal); }
     function openAddModal() { addForm.reset(); populateAddCategorySelect(); updateSubcategoryField(); openModal(addModal); }
     function populateAddCategorySelect() { $('add-category').innerHTML = toolboxData.categories.map(cat => `<option value="${escapeHtml(cat.id)}">${cat.icon} ${escapeHtml(cat.name)}</option>`).join(''); $('add-category').value = activeCategory; }
     function updateSubcategoryField() { const cat = toolboxData.categories.find(c => c.id === $('add-category').value); const field = $('add-subcategory-field'); const select = $('add-subcategory'); if (cat?.subcategories) { field.classList.remove('hidden'); select.innerHTML = cat.subcategories.map(sub => `<option value="${escapeHtml(sub.name)}">${escapeHtml(sub.name)}</option>`).join(''); } else { field.classList.add('hidden'); select.innerHTML = ''; } }
@@ -89,10 +103,10 @@
     function generateId() { return 'custom-' + Date.now(); }
     function hasDuplicateUrl(url, ignoreId = '') { return url && getAllItems().some(item => item.id !== ignoreId && item.url && item.url.trim().toLowerCase() === url.toLowerCase()); }
 
-    detailForm.addEventListener('submit', async e => { e.preventDefault(); const found = findItemById($('detail-id').value); if (!found) return; const name = $('detail-name').value.trim(), url = $('detail-url').value.trim(); if (hasDuplicateUrl(url, found.id) && !confirm('已有工具使用相同網址，仍要儲存嗎？')) return; found.name = name; found.url = url; found.tags = parseTags($('detail-tags').value); found.note = $('detail-note').value.trim(); try { await saveData(); closeModal(detailModal); renderContent(); } catch (error) { console.error(error); setStatus('儲存失敗，請稍後再試', true); } });
+    detailForm.addEventListener('submit', async e => { e.preventDefault(); const record = findItemRecord($('detail-id').value); if (!record) return; const found = record.item; const name = $('detail-name').value.trim(), url = $('detail-url').value.trim(); if (!name) { setStatus('工具名稱不可空白', true); return; } if (hasDuplicateUrl(url, found.id) && !confirm('已有工具使用相同網址，仍要儲存嗎？')) return; found.name = name; found.url = url; found.tags = parseTags($('detail-tags').value); found.note = $('detail-note').value.trim(); try { await saveData(); closeModal(detailModal); renderContent(); showToast('工具資料已更新並同步'); } catch (error) { console.error(error); setStatus('儲存失敗，請稍後再試', true); } });
     $('detail-url').addEventListener('input', updateVisitButton);
     $('detail-delete').addEventListener('click', () => { pendingDeleteId = $('detail-id').value; $('delete-password').value = ''; $('password-error').classList.add('hidden'); closeModal(detailModal); openModal(passwordModal); setTimeout(() => $('delete-password').focus(), 50); });
-    $('password-form').addEventListener('submit', async e => { e.preventDefault(); if (!DELETE_PASSWORD_CONFIGURED || $('delete-password').value !== ADMIN_DELETE_PASSWORD) { $('password-error').classList.remove('hidden'); return; } const found = findItemById(pendingDeleteId); if (!found) return; undoSnapshot = deepCopy(toolboxData); const cat = toolboxData.categories.find(c => c.id === found.category.id); if (cat.subcategories) { const sub = cat.subcategories.find(s => s.name === found.subcategory); if (sub) sub.items = sub.items.filter(item => item.id !== pendingDeleteId); } else cat.items = cat.items.filter(item => item.id !== pendingDeleteId); try { await saveData(); closeModal(passwordModal); pendingDeleteId = null; renderContent(); showToast('工具已刪除，可在 8 秒內復原'); } catch (error) { toolboxData = undoSnapshot; undoSnapshot = null; setStatus('刪除同步失敗，資料已復原', true); } });
+    $('password-form').addEventListener('submit', async e => { e.preventDefault(); if (!DELETE_PASSWORD_CONFIGURED || $('delete-password').value !== ADMIN_DELETE_PASSWORD) { $('password-error').classList.remove('hidden'); return; } const record = findItemRecord(pendingDeleteId); if (!record) return; undoSnapshot = deepCopy(toolboxData); const cat = record.category; if (cat.subcategories) { const sub = cat.subcategories.find(s => s.name === record.subcategory); if (sub) sub.items = sub.items.filter(item => item.id !== pendingDeleteId); } else cat.items = cat.items.filter(item => item.id !== pendingDeleteId); try { await saveData(); closeModal(passwordModal); pendingDeleteId = null; renderContent(); showToast('工具已刪除，可在 8 秒內復原'); } catch (error) { toolboxData = undoSnapshot; undoSnapshot = null; setStatus('刪除同步失敗，資料已復原', true); } });
     addForm.addEventListener('submit', async e => { e.preventDefault(); const catId = $('add-category').value, cat = toolboxData.categories.find(c => c.id === catId); if (!cat) return; const url = $('add-url').value.trim(); if (hasDuplicateUrl(url) && !confirm('已有工具使用相同網址，仍要新增嗎？')) return; const item = { id: generateId(), name: $('add-name').value.trim(), url, tags: parseTags($('add-tags').value), note: $('add-note').value.trim() }; if (cat.subcategories) { const sub = cat.subcategories.find(s => s.name === $('add-subcategory').value); if (sub) sub.items.push(item); } else cat.items.push(item); try { await saveData(); activeCategory = catId; activeView = 'category'; closeModal(addModal); renderViewTabs(); renderTabs(); renderContent(); showToast('工具已新增並同步'); } catch (error) { setStatus('新增失敗，請稍後再試', true); } });
 
     function showToast(message) { clearTimeout(undoTimer); $('toast-message').textContent = message; $('toast-action').classList.toggle('hidden', !undoSnapshot); $('toast').classList.remove('hidden'); if (undoSnapshot) undoTimer = setTimeout(() => { undoSnapshot = null; $('toast').classList.add('hidden'); }, 8000); else setTimeout(() => $('toast').classList.add('hidden'), 3500); }
