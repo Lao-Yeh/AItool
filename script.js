@@ -1,20 +1,27 @@
-(function () {
+(() => {
     const STORAGE_KEY = 'ai-toolbox-data';
 
-    let toolboxData = loadData();
+    let toolboxData = null;
     let activeCategory = 'ai';
     let searchQuery = '';
 
     const tabsEl = document.getElementById('category-tabs');
     const mainEl = document.getElementById('main-content');
     const searchEl = document.getElementById('search-input');
+    const statusEl = document.getElementById('storage-status');
 
     const detailModal = document.getElementById('detail-modal');
     const detailForm = document.getElementById('detail-form');
     const addModal = document.getElementById('add-modal');
     const addForm = document.getElementById('add-form');
 
-    function loadData() {
+    function setStatus(text, isError = false) {
+        if (!statusEl) return;
+        statusEl.textContent = text;
+        statusEl.style.color = isError ? '#b42318' : '';
+    }
+
+    function localData() {
         try {
             const saved = localStorage.getItem(STORAGE_KEY);
             if (saved) return JSON.parse(saved);
@@ -22,8 +29,62 @@
         return JSON.parse(JSON.stringify(DEFAULT_DATA));
     }
 
-    function saveData() {
+    function supabaseEndpoint() {
+        return `${SUPABASE_CONFIG.url}/rest/v1/${SUPABASE_CONFIG.table}`;
+    }
+
+    async function loadData() {
+        const fallback = localData();
+        if (!SUPABASE_ENABLED) {
+            setStatus('資料儲存於此裝置瀏覽器（尚未設定雲端同步）');
+            return fallback;
+        }
+
+        try {
+            const response = await fetch(`${supabaseEndpoint()}?select=data&id=eq.${SUPABASE_CONFIG.rowId}`, {
+                headers: {
+                    apikey: SUPABASE_CONFIG.anonKey,
+                    Authorization: `Bearer ${SUPABASE_CONFIG.anonKey}`
+                }
+            });
+            if (!response.ok) throw new Error(`讀取失敗（HTTP ${response.status}）`);
+            const rows = await response.json();
+            if (rows[0]?.data) {
+                localStorage.setItem(STORAGE_KEY, JSON.stringify(rows[0].data));
+                setStatus('資料已由雲端載入，所有裝置共用同一份資料');
+                return rows[0].data;
+            }
+
+            toolboxData = fallback;
+            await saveData();
+            setStatus('已建立第一份雲端資料');
+            return toolboxData;
+        } catch (error) {
+            console.error(error);
+            setStatus('雲端讀取失敗，暫時使用此裝置資料：請檢查 Supabase 設定', true);
+            return fallback;
+        }
+    }
+
+    async function saveData() {
         localStorage.setItem(STORAGE_KEY, JSON.stringify(toolboxData));
+        if (!SUPABASE_ENABLED) {
+            setStatus('已儲存於此裝置瀏覽器；設定 Supabase 後才能跨裝置同步');
+            return;
+        }
+
+        const response = await fetch(supabaseEndpoint(), {
+            method: 'POST',
+            headers: {
+                apikey: SUPABASE_CONFIG.anonKey,
+                Authorization: `Bearer ${SUPABASE_CONFIG.anonKey}`,
+                'Content-Type': 'application/json',
+                Prefer: 'resolution=merge-duplicates,return=minimal'
+            },
+            body: JSON.stringify({ id: SUPABASE_CONFIG.rowId, data: toolboxData })
+        });
+        if (!response.ok) throw new Error(`儲存失敗（HTTP ${response.status}）`);
+        setStatus('已儲存至雲端，手機重新整理後即可看到更新');
     }
 
     function findItemById(id) {
@@ -115,7 +176,7 @@
 
     function renderContent() {
         const allItems = getAllItems();
-        let filtered = allItems.filter(item =>
+        const filtered = allItems.filter(item =>
             item.category.id === activeCategory && matchesSearch(item, searchQuery)
         );
 
@@ -146,7 +207,6 @@
         }
 
         mainEl.innerHTML = html;
-
         mainEl.querySelectorAll('.card').forEach(card => {
             card.addEventListener('click', () => openDetailModal(card.dataset.id));
         });
@@ -176,9 +236,7 @@
     function openDetailModal(id) {
         const found = findItemById(id);
         if (!found) return;
-
         const { item, cat, subcategory } = found;
-
         document.getElementById('detail-id').value = item.id;
         document.getElementById('detail-category-id').value = cat.id;
         document.getElementById('detail-subcategory').value = subcategory || '';
@@ -186,7 +244,6 @@
         document.getElementById('detail-url').value = item.url || '';
         document.getElementById('detail-tags').value = (item.tags || []).join(', ');
         document.getElementById('detail-note').value = item.note || '';
-
         document.getElementById('detail-delete').classList.toggle('hidden', !item.id.startsWith('custom-'));
         updateVisitButton();
         openModal(detailModal);
@@ -212,7 +269,6 @@
         const cat = toolboxData.categories.find(c => c.id === catId);
         const field = document.getElementById('add-subcategory-field');
         const select = document.getElementById('add-subcategory');
-
         if (cat && cat.subcategories) {
             field.classList.remove('hidden');
             select.innerHTML = cat.subcategories.map(sub =>
@@ -232,32 +288,33 @@
         return 'custom-' + Date.now();
     }
 
-    detailForm.addEventListener('submit', (e) => {
+    detailForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const id = document.getElementById('detail-id').value;
         const found = findItemById(id);
         if (!found) return;
-
         found.item.name = document.getElementById('detail-name').value.trim();
         found.item.url = document.getElementById('detail-url').value.trim();
         found.item.tags = parseTags(document.getElementById('detail-tags').value);
         found.item.note = document.getElementById('detail-note').value.trim();
-
-        saveData();
-        closeModal(detailModal);
-        renderContent();
+        try {
+            await saveData();
+            closeModal(detailModal);
+            renderContent();
+        } catch (error) {
+            console.error(error);
+            setStatus('儲存失敗，請檢查 Supabase 資料表與權限設定', true);
+        }
     });
 
     document.getElementById('detail-url').addEventListener('input', updateVisitButton);
 
-    document.getElementById('detail-delete').addEventListener('click', () => {
+    document.getElementById('detail-delete').addEventListener('click', async () => {
         const id = document.getElementById('detail-id').value;
         if (!id.startsWith('custom-')) return;
         if (!confirm('確定要刪除此工具嗎？')) return;
-
         const found = findItemById(id);
         if (!found) return;
-
         const { cat, subcategory } = found;
         if (cat.subcategories) {
             const sub = cat.subcategories.find(s => s.name === subcategory);
@@ -265,18 +322,21 @@
         } else if (cat.items) {
             cat.items = cat.items.filter(i => i.id !== id);
         }
-
-        saveData();
-        closeModal(detailModal);
-        renderContent();
+        try {
+            await saveData();
+            closeModal(detailModal);
+            renderContent();
+        } catch (error) {
+            console.error(error);
+            setStatus('刪除後同步失敗，請檢查 Supabase 設定', true);
+        }
     });
 
-    addForm.addEventListener('submit', (e) => {
+    addForm.addEventListener('submit', async (e) => {
         e.preventDefault();
         const catId = document.getElementById('add-category').value;
         const cat = toolboxData.categories.find(c => c.id === catId);
         if (!cat) return;
-
         const newItem = {
             id: generateId(),
             name: document.getElementById('add-name').value.trim(),
@@ -284,7 +344,6 @@
             tags: parseTags(document.getElementById('add-tags').value),
             note: document.getElementById('add-note').value.trim()
         };
-
         if (cat.subcategories) {
             const subName = document.getElementById('add-subcategory').value;
             const sub = cat.subcategories.find(s => s.name === subName);
@@ -292,16 +351,19 @@
         } else {
             cat.items.push(newItem);
         }
-
-        saveData();
-        activeCategory = catId;
-        closeModal(addModal);
-        renderTabs();
-        renderContent();
+        try {
+            await saveData();
+            activeCategory = catId;
+            closeModal(addModal);
+            renderTabs();
+            renderContent();
+        } catch (error) {
+            console.error(error);
+            setStatus('新增成功但雲端同步失敗，請檢查 Supabase 設定', true);
+        }
     });
 
     document.getElementById('add-category').addEventListener('change', updateSubcategoryField);
-
     document.getElementById('btn-add').addEventListener('click', openAddModal);
     document.getElementById('detail-close').addEventListener('click', () => closeModal(detailModal));
     document.getElementById('detail-cancel').addEventListener('click', () => closeModal(detailModal));
@@ -314,12 +376,17 @@
     addModal.addEventListener('click', (e) => {
         if (e.target === addModal) closeModal(addModal);
     });
-
     searchEl.addEventListener('input', (e) => {
         searchQuery = e.target.value.trim();
         renderContent();
     });
 
-    renderTabs();
-    renderContent();
+    async function init() {
+        mainEl.innerHTML = '<div class="empty-state"><p>正在載入資料…</p></div>';
+        toolboxData = await loadData();
+        renderTabs();
+        renderContent();
+    }
+
+    init();
 })();
